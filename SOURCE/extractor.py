@@ -48,12 +48,10 @@ class P7MExtractor:
             if content_info['content_type'].native != 'signed_data':
                 raise P7MExtractionError("Il file non è un formato SignedData (CAdES) valido.")
 
-            signed_data = content_info['content']
-            encap_content_info = signed_data['encap_content_info']
-            
-            # Estrae l'array dei byte contenente il file originale
-            content_bytes: bytes = encap_content_info['content'].native
+            content_bytes: bytes = P7MExtractor._unwrap(content_info)
 
+        except P7MExtractionError:
+            raise
         except Exception as e:
             # Cattura errori di parsing ASN1
             raise P7MExtractionError(f"Errore nel parsing del file P7M. File corrotto o formato non supportato: {e}")
@@ -72,6 +70,35 @@ class P7MExtractor:
             raise P7MExtractionError(f"Impossibile scrivere il file temporaneo: {e}")
 
         return pdf_output_path
+
+    # Limite di sicurezza sugli involucri annidati (firme multiple "a matrioska")
+    MAX_NESTING: int = 10
+
+    @staticmethod
+    def _unwrap(content_info: cms.ContentInfo) -> bytes:
+        """
+        Estrae il contenuto da un SignedData, sbucciando eventuali P7M annidati
+        (file firmati piu' volte in sequenza, es. nome.pdf.p7m.p7m).
+        """
+        for _ in range(P7MExtractor.MAX_NESTING):
+            encap = content_info['content']['encap_content_info']
+            content_bytes = encap['content'].native
+            if content_bytes is None:
+                raise P7MExtractionError(
+                    "Firma detached: il P7M non contiene il documento (solo la firma).")
+
+            # Il contenuto e' a sua volta un P7M? (DER inizia con SEQUENCE 0x30)
+            if content_bytes[:1] == b'\x30':
+                try:
+                    inner = cms.ContentInfo.load(content_bytes)
+                    if inner['content_type'].native == 'signed_data':
+                        content_info = inner
+                        continue
+                except Exception:
+                    pass  # non e' un CMS: lo restituiamo cosi' com'e'
+            return content_bytes
+
+        raise P7MExtractionError("Troppi livelli di firma annidati nel file P7M.")
 
     @staticmethod
     def _pem_to_der(pem_data: bytes) -> bytes:
